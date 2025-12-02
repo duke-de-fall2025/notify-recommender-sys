@@ -1,58 +1,50 @@
+import boto3
+import random
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.providers.amazon.aws.hooks.base_aws import AwsBaseHook
 from datetime import datetime
-import pandas as pd
-import numpy as np
-from typing import List
 from decimal import Decimal
 
 # ==========================================================
 # CONFIG
 # ==========================================================
 
-DAG_ID = "ads_embedding_pipeline_notify_final"
+DAG_ID = "ads_embedding_pipeline_notify_mwaa_safe"
 AWS_CONN_ID = "aws_default"
 
 PRODUCT_TABLE = "notify_products_test"        # id (N)
 PURCHASE_TABLE = "notify_purchases_test"      # user_id (S)
-USER_EMBED_TABLE = "notify_users_test"        # output table
-
-CAMPAIGN_TABLE = "notify_campaigns_test"      # if you create later
+USER_EMBED_TABLE = "notify_users_test"        # output
 
 EMBED_DIM = 384
-USER_EMBED_DIM = EMBED_DIM * 5  # 1920
-
-TMP = {
-    "products": "/tmp/products.parquet",
-    "products_embedded": "/tmp/products_embedded.parquet",
-    "purchases": "/tmp/purchases.parquet",
-    "users_embedded": "/tmp/users_embedded.parquet",
-    "campaigns": "/tmp/campaigns.parquet",
-    "campaigns_embedded": "/tmp/campaigns_embedded.parquet",
-}
+LAST_K = 5
+USER_EMBED_DIM = EMBED_DIM * LAST_K  # 1920
 
 # ==========================================================
 # HELPERS
 # ==========================================================
 
 def aws_resource(service: str):
-    hook = AwsBaseHook(
-        aws_conn_id=AWS_CONN_ID,
-        client_type=service
+    hook = AwsBaseHook(aws_conn_id=AWS_CONN_ID)
+    credentials = hook.get_credentials()
+    region = hook.region_name or "us-east-1"
+
+    return boto3.resource(
+        service,
+        aws_access_key_id=credentials.access_key,
+        aws_secret_access_key=credentials.secret_key,
+        aws_session_token=credentials.token,
+        region_name=region
     )
-    return hook.get_resource_type(service)
 
 def convert_decimals(item):
-    out = {}
     for k, v in item.items():
         if isinstance(v, Decimal):
-            out[k] = float(v)
-        else:
-            out[k] = v
-    return out
+            item[k] = float(v)
+    return item
 
-def scan_table(table_name: str) -> pd.DataFrame:
+def scan_table(table_name):
     dynamodb = aws_resource("dynamodb")
     table = dynamodb.Table(table_name)
 
@@ -61,211 +53,118 @@ def scan_table(table_name: str) -> pd.DataFrame:
     items.extend(resp.get("Items", []))
 
     while "LastEvaluatedKey" in resp:
-        resp = table.scan(
-            ExclusiveStartKey=resp["LastEvaluatedKey"]
-        )
+        resp = table.scan(ExclusiveStartKey=resp["LastEvaluatedKey"])
         items.extend(resp.get("Items", []))
 
-    cleaned = [convert_decimals(i) for i in items]
-    return pd.DataFrame(cleaned)
+    return [convert_decimals(i) for i in items]
 
-def fake_embed(texts: List[str], dim: int = EMBED_DIM):
-    return np.random.rand(len(texts), dim).tolist()
+def fake_embed(dim=EMBED_DIM):
+    return [random.random() for _ in range(dim)]
 
 # ==========================================================
-# TASK LOGIC
+# TASKS
 # ==========================================================
 
-# 1. EXTRACT PRODUCTS
-def extract_products_ddb():
-    df = scan_table(PRODUCT_TABLE)
-    df.to_parquet(TMP["products"])
-
-# 2. GENERATE PRODUCT EMBEDDINGS
-def generate_product_embeddings():
-    df = pd.read_parquet(TMP["products"])
-
-    df["embed_text"] = (
-        df["productDisplayName"].astype(str)
-        + " "
-        + df["articleType"].astype(str)
-        + " "
-        + df["baseColour"].astype(str)
-    )
-
-    df["embedding"] = fake_embed(df["embed_text"].tolist())
-    df.to_parquet(TMP["products_embedded"])
-
-# 3. EXTRACT PURCHASES
-def extract_purchases_ddb():
-    df = scan_table(PURCHASE_TABLE)
-    df.to_parquet(TMP["purchases"])
-
-# 4. BUILD USER EMBEDDINGS (LAST 5 PURCHASE CONCAT)
-def build_user_embeddings_last5_concat():
-    purchases = pd.read_parquet(TMP["purchases"])
-    products = pd.read_parquet(TMP["products_embedded"])
-
-    # JOIN ON product id
-    merged = purchases.merge(
-        products[["id", "embedding"]],
-        on="id",
-        how="left"
-    )
-
-    # REQUIRED COLUMN IN notify_purchases_test:
-    # purchase_ts (or change this field name below)
-    merged["purchase_ts"] = pd.to_datetime(merged["purchase_ts"])
-
-    merged = merged.sort_values(
-        by=["user_id", "purchase_ts"],
-        ascending=[True, False]
-    )
-
-    last5 = merged.groupby("user_id").head(5)
-
-    zero_vec = [0.0] * EMBED_DIM
-    user_rows = []
-
-    for user_id, grp in last5.groupby("user_id"):
-        vecs = grp["embedding"].dropna().tolist()
-
-        while len(vecs) < 5:
-            vecs.append(zero_vec)
-
-        final_vec = []
-        for v in vecs[:5]:
-            final_vec.extend(v)
-
-        user_rows.append({
-            "user_id": str(user_id),
-            "embedding": final_vec
-        })
-
-    pd.DataFrame(user_rows).to_parquet(
-        TMP["users_embedded"]
-    )
-
-# 5. PERSIST USER EMBEDDINGS → notify_users_test
-def persist_user_embeddings_ddb():
-    df = pd.read_parquet(TMP["users_embedded"])
+# 1. EXTRACT + EMBED PRODUCTS (WRITE EMBEDDING BACK TO notify_products_test)
+def extract_and_embed_products():
     dynamodb = aws_resource("dynamodb")
-    table = dynamodb.Table(USER_EMBED_TABLE)
+    product_table = dynamodb.Table(PRODUCT_TABLE)
 
-    with table.batch_writer() as batch:
-        for _, r in df.iterrows():
-            batch.put_item(
-                Item={
-                    "user_id": r["user_id"],
-                    "embedding": r["embedding"],
-                    "updated_at": datetime.utcnow().isoformat()
-                }
-            )
+    products = scan_table(PRODUCT_TABLE)
 
-# ==========================================================
-# OPTIONAL CAMPAIGN PIPELINE (DUMMY)
-# ==========================================================
+    for p in products:
+        pid = int(p["id"])
+        emb = fake_embed()
 
-def generate_dummy_campaigns():
-    df = pd.DataFrame({
-        "campaign_id": [1, 2, 3],
-        "campaign_name": [
-            "Winter Sale",
-            "Sports Bonanza",
-            "Women Essentials"
-        ],
-        "category": [
-            "Winter Wear",
-            "Sports",
-            "Women"
-        ]
-    })
+        product_table.update_item(
+            Key={"id": pid},
+            UpdateExpression="SET embedding = :e, updated_at = :u",
+            ExpressionAttributeValues={
+                ":e": emb,
+                ":u": datetime.utcnow().isoformat()
+            }
+        )
 
-    df.to_parquet(TMP["campaigns"])
+# 2. EXTRACT PURCHASES (FOR DEBUG / FUTURE USE)
+def extract_purchases():
+    # This is not strictly needed by the DAG logic, but
+    # you may keep it for debugging / future transformations
+    _ = scan_table(PURCHASE_TABLE)
 
-def generate_campaign_embeddings():
-    df = pd.read_parquet(TMP["campaigns"])
-
-    df["embed_text"] = (
-        df["campaign_name"] + " " + df["category"]
-    )
-
-    df["embedding"] = fake_embed(df["embed_text"].tolist())
-    df.to_parquet(TMP["campaigns_embedded"])
-
-def persist_campaign_embeddings_ddb():
-    df = pd.read_parquet(TMP["campaigns_embedded"])
+# 3. BUILD USER EMBEDDINGS = CONCAT OF LAST K PRODUCT EMBEDDINGS
+def build_and_persist_user_embeddings():
     dynamodb = aws_resource("dynamodb")
-    table = dynamodb.Table(CAMPAIGN_TABLE)
 
-    with table.batch_writer() as batch:
-        for _, r in df.iterrows():
-            batch.put_item(
-                Item={
-                    "campaign_id": int(r["campaign_id"]),
-                    "embedding": r["embedding"],
-                    "updated_at": datetime.utcnow().isoformat()
-                }
-            )
+    product_table = dynamodb.Table(PRODUCT_TABLE)
+    user_table = dynamodb.Table(USER_EMBED_TABLE)
+
+    purchases = scan_table(PURCHASE_TABLE)
+
+    # Group by user
+    user_map = {}
+    for p in purchases:
+        uid = p["user_id"]
+        pid = int(p["id"])
+        ts = p.get("purchase_ts", p.get("created_at", 0))
+        user_map.setdefault(uid, []).append((pid, ts))
+
+    # Process each user
+    for user_id, rows in user_map.items():
+        # Sort by time DESC
+        rows.sort(key=lambda x: x[1], reverse=True)
+        lastk = rows[:LAST_K]
+
+        user_vector = []
+
+        for pid, _ in lastk:
+            resp = product_table.get_item(Key={"id": pid})
+            item = resp.get("Item")
+
+            if item and "embedding" in item:
+                emb = item["embedding"]
+            else:
+                emb = [0.0] * EMBED_DIM
+
+            user_vector.extend(emb)
+
+        # Pad if fewer than K purchases
+        while len(user_vector) < USER_EMBED_DIM:
+            user_vector.extend([0.0] * EMBED_DIM)
+
+        user_table.put_item(
+            Item={
+                "user_id": str(user_id),
+                "embedding": user_vector,
+                "updated_at": datetime.utcnow().isoformat()
+            }
+        )
 
 # ==========================================================
-# DAG DEFINITION
+# DAG
 # ==========================================================
 
 with DAG(
     dag_id=DAG_ID,
     start_date=datetime(2025, 1, 1),
-    schedule_interval="@daily",
+    schedule="@daily",
     catchup=False,
-    tags=["ads", "dynamodb", "embeddings", "recsys"]
+    tags=["ads", "dynamodb", "mwaa-safe"]
 ):
 
-    extract_products_ddb_task = PythonOperator(
-        task_id="extract_products_ddb",
-        python_callable=extract_products_ddb
+    extract_and_embed_products_task = PythonOperator(
+        task_id="extract_and_embed_products",
+        python_callable=extract_and_embed_products
     )
 
-    generate_product_embeddings_task = PythonOperator(
-        task_id="generate_product_embeddings",
-        python_callable=generate_product_embeddings
+    extract_purchases_task = PythonOperator(
+        task_id="extract_purchases",
+        python_callable=extract_purchases
     )
 
-    extract_purchases_ddb_task = PythonOperator(
-        task_id="extract_purchases_ddb",
-        python_callable=extract_purchases_ddb
+    build_and_persist_user_embeddings_task = PythonOperator(
+        task_id="build_and_persist_user_embeddings",
+        python_callable=build_and_persist_user_embeddings
     )
 
-    build_user_embeddings_last5_concat_task = PythonOperator(
-        task_id="build_user_embeddings_last5_concat",
-        python_callable=build_user_embeddings_last5_concat
-    )
-
-    persist_user_embeddings_ddb_task = PythonOperator(
-        task_id="persist_user_embeddings_ddb",
-        python_callable=persist_user_embeddings_ddb
-    )
-
-    # Optional campaign flow
-    generate_dummy_campaigns_task = PythonOperator(
-        task_id="generate_dummy_campaigns",
-        python_callable=generate_dummy_campaigns
-    )
-
-    generate_campaign_embeddings_task = PythonOperator(
-        task_id="generate_campaign_embeddings",
-        python_callable=generate_campaign_embeddings
-    )
-
-    persist_campaign_embeddings_ddb_task = PythonOperator(
-        task_id="persist_campaign_embeddings_ddb",
-        python_callable=persist_campaign_embeddings_ddb
-    )
-
-    # --------------------------
-    # DEPENDENCIES
-    # --------------------------
-
-    extract_products_ddb_task >> generate_product_embeddings_task >> build_user_embeddings_last5_concat_task
-    extract_purchases_ddb_task >> build_user_embeddings_last5_concat_task >> persist_user_embeddings_ddb_task
-
-    generate_dummy_campaigns_task >> generate_campaign_embeddings_task >> persist_campaign_embeddings_ddb_task
+    extract_and_embed_products_task >> build_and_persist_user_embeddings_task
+    extract_purchases_task >> build_and_persist_user_embeddings_task
