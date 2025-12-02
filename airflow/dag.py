@@ -25,6 +25,12 @@ USER_EMBED_DIM = EMBED_DIM * LAST_K  # 1920
 # HELPERS
 # ==========================================================
 
+from decimal import Decimal
+
+def to_decimal_vector(vec):
+    return [Decimal(str(x)) for x in vec]
+
+
 def aws_resource(service: str):
     hook = AwsBaseHook(aws_conn_id=AWS_CONN_ID)
     credentials = hook.get_credentials()
@@ -80,10 +86,11 @@ def extract_and_embed_products():
             Key={"id": pid},
             UpdateExpression="SET embedding = :e, updated_at = :u",
             ExpressionAttributeValues={
-                ":e": emb,
+                ":e": to_decimal_vector(emb),   
                 ":u": datetime.utcnow().isoformat()
             }
         )
+
 
 # 2. EXTRACT PURCHASES (FOR DEBUG / FUTURE USE)
 def extract_purchases():
@@ -134,10 +141,11 @@ def build_and_persist_user_embeddings():
         user_table.put_item(
             Item={
                 "user_id": str(user_id),
-                "embedding": user_vector,
+                "embedding": to_decimal_vector(user_vector),
                 "updated_at": datetime.utcnow().isoformat()
             }
         )
+
 
 # ==========================================================
 # DAG
