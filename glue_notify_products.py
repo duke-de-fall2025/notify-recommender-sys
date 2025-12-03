@@ -52,7 +52,7 @@ df = df.withColumn(
     "image_url",
     F.concat(
         F.lit("s3://notify-products/images/fashion/"),
-        F.col("id").cast("string"),
+        F.col("product_id").cast("string"),
         F.lit(".jpg")
     )
 )

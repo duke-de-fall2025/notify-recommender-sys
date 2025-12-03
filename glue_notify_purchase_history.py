@@ -38,10 +38,11 @@ df = df.withColumn(
 df = (df
     .withColumn("user_id", F.col("user_id").cast("string"))
     .withColumn("purchase_id", F.col("purchase_id").cast("string"))
-    .withColumn("id", F.col("id").cast("int"))                  # DynamoDB: Number
+    .withColumn("product_id", F.col("product_id").cast("int"))                  # DynamoDB: Number
     .withColumn("quantity", F.col("quantity").cast("int"))      # DynamoDB: Number
     .withColumn("price", F.col("price").cast("int"))            # DynamoDB: Number
     .withColumn("purchase_date", F.col("purchase_date").cast("string"))
+    .withColumn("total_amount", F.col("total_amount").cast("int")) # DynamoDB: Number
 )
 
 # Write output as Parquet
