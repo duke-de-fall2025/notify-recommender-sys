@@ -5,3 +5,5 @@ kafka-python
 psycopg2-binary
 sqlalchemy
 boto3
+pytest 
+pytest-cov
