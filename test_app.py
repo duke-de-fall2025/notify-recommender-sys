@@ -16,7 +16,6 @@ sys.modules['kafka'] = fake_kafka
 # -------------------------------
 # Step 2: Import app safely
 # -------------------------------
-import app
 from app import load_image_from_s3, create_view_dialog, check_user_alerts, FALLBACK_IMAGE
 
 # -------------------------------
