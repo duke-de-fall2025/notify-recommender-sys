@@ -11,6 +11,7 @@ import streamlit as st
 # -------------------------------
 fake_kafka = types.ModuleType("kafka")
 fake_kafka.KafkaProducer = MagicMock(return_value=MagicMock())
+fake_kafka.KafkaConsumer = MagicMock(return_value=MagicMock())
 sys.modules['kafka'] = fake_kafka
 
 # -------------------------------
