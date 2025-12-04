@@ -21,18 +21,6 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_LOG_DIRS: /var/lib/kafka/data
 
-  postgres:
-    image: postgres:15
-    container_name: postgres
-    environment:
-      POSTGRES_USER: kafka_user
-      POSTGRES_PASSWORD: kafka_password
-      POSTGRES_DB: kafka_db
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-
   streamlit:
     build:
       context: .
@@ -44,8 +32,9 @@ services:
       - .:/app
     depends_on:
       - kafka
-      - postgres
     environment:
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
       - PYTHONUNBUFFERED=1
 
   consumer:
@@ -56,12 +45,10 @@ services:
     command: python consumer.py
     depends_on:
       - kafka
-      - postgres
     volumes:
       - .:/app
     environment:
       - PYTHONUNBUFFERED=1
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
     restart: unless-stopped
-
-volumes:
-  postgres_data:

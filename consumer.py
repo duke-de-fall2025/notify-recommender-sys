@@ -1,44 +1,38 @@
+import logging
+logging.getLogger("kafka").setLevel(logging.WARNING)
+logging.getLogger("kafka.conn").setLevel(logging.WARNING)
+logging.getLogger("kafka.consumer").setLevel(logging.WARNING)
+logging.getLogger("kafka.producer").setLevel(logging.WARNING)
+
 import json
 import time
-import psycopg2
+import uuid
+import boto3
 from kafka import KafkaConsumer
-from psycopg2 import OperationalError
 from kafka.errors import NoBrokersAvailable
+from botocore.exceptions import ClientError
 
-POSTGRES_CONFIG = dict(
-    dbname="kafka_db",
-    user="kafka_user",
-    password="kafka_password",
-    host="postgres",   # docker-compose service name
-    port="5432",
-)
+# -----------------------------
+# AWS DynamoDB Configuration
+# -----------------------------
+DYNAMO_TABLE = "notify_clickstream"
+AWS_REGION = "us-east-1"
 
+dynamodb = boto3.resource("dynamodb", region_name=AWS_REGION)
+table = dynamodb.Table(DYNAMO_TABLE)
+
+# -----------------------------
+# Kafka Configuration
+# -----------------------------
 KAFKA_BOOTSTRAP = "kafka:9092"
 
-
-# -----------------------------------
-# Wait for PostgreSQL
-# -----------------------------------
-def wait_for_postgres(max_retries=30, delay=2):
-    for attempt in range(max_retries):
-        try:
-            print(f"📌 Connecting to PostgreSQL (attempt {attempt+1})...")
-            conn = psycopg2.connect(**POSTGRES_CONFIG)
-            print("✅ PostgreSQL connected")
-            return conn
-        except OperationalError:
-            print("❌ Postgres not ready, retrying...")
-            time.sleep(delay)
-    raise Exception("❌ Failed to connect to PostgreSQL after multiple retries")
-
-
-# -----------------------------------
+# -----------------------------
 # Wait for Kafka Broker
-# -----------------------------------
+# -----------------------------
 def wait_for_kafka(max_retries=30, delay=2):
     for attempt in range(max_retries):
         try:
-            print(f"📌 Connecting to Kafka (attempt {attempt+1})...")
+            print(f"Connecting to Kafka (attempt {attempt + 1})...")
             consumer = KafkaConsumer(
                 "clickstream",
                 bootstrap_servers=KAFKA_BOOTSTRAP,
@@ -49,54 +43,59 @@ def wait_for_kafka(max_retries=30, delay=2):
             )
             print("✅ Kafka broker connected")
             return consumer
+
         except NoBrokersAvailable:
             print("❌ Kafka not ready, retrying...")
             time.sleep(delay)
+
     raise Exception("❌ Failed to connect to Kafka after multiple retries")
 
+# -----------------------------
+# Verify DynamoDB Table Exists
+# -----------------------------
+try:
+    table.load()
+    print(f"✅ Using DynamoDB table: {DYNAMO_TABLE}")
+except ClientError:
+    raise Exception(f"❌ DynamoDB table '{DYNAMO_TABLE}' does NOT exist! Create it first.")
 
-# -----------------------------------
-# Connect with retries
-# -----------------------------------
-conn = wait_for_postgres()
-cursor = conn.cursor()
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS clickstream (
-    id SERIAL PRIMARY KEY,
-    event_type TEXT,
-    product_id INT,
-    product_name TEXT,
-    category TEXT,
-    timestamp TIMESTAMP
-)
-""")
-conn.commit()
-
+# -----------------------------
+# Start Kafka Consumer
+# -----------------------------
 consumer = wait_for_kafka()
 
+print("\n🟢 Kafka → DynamoDB consumer started")
+print("📥 Waiting for messages...\n")
 
-print("🟢 Kafka → PostgreSQL consumer started")
-print("📥 Waiting for messages...")
+# -----------------------------
+# Message Consumption Loop
+# -----------------------------
+try:
+    for message in consumer:
+        data = message.value
 
+        item = {
+            "id": str(uuid.uuid4()),
+            "event_type": str(data.get("event")),
+            "price": int(data.get("price")),
+            "product_id": int(data.get("product_id")),
+            "product_name": str(data.get("product_name")),
+            "category": str(data.get("category")),
+            "article_type": str(data.get("article_type")),
+            "timestamp": str(data.get("timestamp")),
+            "user_id": str(data.get("user_id", "U0020")),  
+        }
 
-# -----------------------------------
-# Consume messages forever
-# -----------------------------------
-for message in consumer:
-    data = message.value
-    cursor.execute(
-        """
-        INSERT INTO clickstream (event_type, product_id, product_name, category, timestamp)
-        VALUES (%s, %s, %s, %s, %s)
-        """,
-        (
-            data.get("event"),
-            data.get("product_id"),
-            data.get("product_name"),
-            data.get("category"),
-            data.get("timestamp")
-        )
-    )
-    conn.commit()
-    print("📌 Saved:", data)
+        try:
+            table.put_item(Item=item)
+            print(f"📌 Saved to DynamoDB: {item}")
+
+        except ClientError as e:
+            print(f"❌ DynamoDB Error: {e.response['Error']['Message']}")
+
+except KeyboardInterrupt:
+    print("\n🛑 Stopping consumer (Ctrl+C detected)")
+
+finally:
+    consumer.close()
+    print("👋 Consumer closed cleanly")
