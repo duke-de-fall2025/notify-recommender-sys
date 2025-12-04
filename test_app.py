@@ -14,6 +14,20 @@ fake_kafka.KafkaProducer = MagicMock(return_value=MagicMock())
 fake_kafka.KafkaConsumer = MagicMock(return_value=MagicMock())
 sys.modules['kafka'] = fake_kafka
 
+fake_boto3 = types.ModuleType("boto3")
+fake_boto3.resource = MagicMock()
+fake_boto3.client = MagicMock()
+
+fake_dynamodb = MagicMock()
+fake_table = MagicMock()
+
+# prevent table.scan() from calling AWS
+fake_table.scan.return_value = {"Items": []}
+fake_dynamodb.Table.return_value = fake_table
+fake_boto3.resource.return_value = fake_dynamodb
+
+sys.modules["boto3"] = fake_boto3
+
 # -------------------------------
 # Step 2: Import app safely
 # -------------------------------
