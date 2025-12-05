@@ -23,16 +23,18 @@ jobs:
           username: ec2-user
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
-            if [ ! -d "/home/ec2-user/app" ]; then
-                echo "Creating /home/ec2-user/app..."
-                mkdir -p /home/ec2-user/app
-                chown ec2-user:ec2-user /home/ec2-user/app
-            else
-                echo "/home/ec2-user/app already exists, skipping creation."
+            # Remove old app directory if it exists
+            if [ -d "/home/ec2-user/app" ]; then
+                echo "Removing old /home/ec2-user/app..."
+                rm -rf /home/ec2-user/app
             fi
+            
+            echo "Creating fresh /home/ec2-user/app..."
+            mkdir -p /home/ec2-user/app
+            chown ec2-user:ec2-user /home/ec2-user/app
 
-      # Step 3: Clone or update repo
-      - name: Deploy repo on EC2
+      # Step 3: Clone repo
+      - name: Clone repo on EC2
         uses: appleboy/ssh-action@v0.1.7
         with:
           host: ${{ secrets.EC2_IP }}
@@ -40,22 +42,26 @@ jobs:
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
             # Install git if missing
-            sudo yum install -y git || sudo apt-get install -y git
-
-            cd /home/ec2-user/app
-
-            if [ -d ".git" ]; then
-              echo "Repo exists, pulling latest changes..."
-              git reset --hard
-              git clean -fd
-              git pull
-            else
-              echo "Cloning repo..."
-              git clone https://github.com/duke-de-fall2025/notify-recommender-sys.git .
+            if ! command -v git &> /dev/null; then
+                sudo yum install -y git || sudo apt-get install -y git
             fi
 
+            cd /home/ec2-user
+            
+            echo "Cloning repo..."
+            git clone https://github.com/duke-de-fall2025/notify-recommender-sys.git app
+            
+            cd app
             echo "Repo contents:"
             ls -la
+            
+            # Verify docker-compose.yml exists
+            if [ -f "docker-compose.yml" ]; then
+                echo "✓ docker-compose.yml found"
+            else
+                echo "✗ ERROR: docker-compose.yml not found!"
+                exit 1
+            fi
 
       # Step 4: Ensure Docker & Docker Compose installed
       - name: Install Docker & Docker Compose if missing
@@ -72,6 +78,9 @@ jobs:
                 sudo systemctl enable docker
                 sudo systemctl start docker
             fi
+            
+            # Add ec2-user to docker group
+            sudo usermod -aG docker ec2-user
 
             # Install Docker Compose if missing
             if ! command -v docker-compose &> /dev/null; then
@@ -91,10 +100,23 @@ jobs:
           username: ec2-user
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
-            cd /home/ec2-user/app  # adjust if docker-compose.yml is in a subfolder
-            docker-compose down
-            docker-compose build
-            docker-compose up -d
+            cd /home/ec2-user/app
+            
+            echo "Current directory: $(pwd)"
+            echo "Files present:"
+            ls -la
+            
+            # Stop and remove old containers
+            sudo docker-compose down || true
+            
+            # Build new containers
+            sudo docker-compose build
+            
+            # Start containers
+            sudo docker-compose up -d
+            
+            echo "Containers running:"
+            sudo docker ps
 
       # Step 6: Run startup scripts and stream logs
       - name: Run startup scripts and stream logs
@@ -104,16 +126,19 @@ jobs:
           username: ec2-user
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
+            # Wait for containers to be ready
+            sleep 5
+            
             # Make startup scripts executable inside containers
-            docker exec -i app bash -c "chmod +x /app/startup/startup.sh"
-            docker exec -i consumer_app bash -c "chmod +x /app/startup/startup.sh"
+            sudo docker exec app bash -c "chmod +x /app/startup/startup.sh" || echo "app container startup script not found"
+            sudo docker exec consumer_app bash -c "chmod +x /app/startup/startup.sh" || echo "consumer_app container startup script not found"
 
             # Run startup scripts in background and log output
-            docker exec -i app bash -c "nohup /app/startup/startup.sh > /app/startup/app.log 2>&1 &"
-            docker exec -i consumer_app bash -c "nohup /app/startup/startup.sh > /app/startup/consumer.log 2>&1 &"
+            sudo docker exec app bash -c "nohup /app/startup/startup.sh > /app/startup/app.log 2>&1 &" || echo "Failed to start app script"
+            sudo docker exec consumer_app bash -c "nohup /app/startup/startup.sh > /app/startup/consumer.log 2>&1 &" || echo "Failed to start consumer script"
 
-            echo "Streaming logs from app container:"
-            docker exec -i app bash -c "tail -f /app/startup/app.log" &
-            echo "Streaming logs from consumer_app container:"
-            docker exec -i consumer_app bash -c "tail -f /app/startup/consumer.log" &
-            wait
+            echo "=== App Container Logs ==="
+            sudo docker logs app
+            
+            echo "=== Consumer Container Logs ==="
+            sudo docker logs consumer_app
