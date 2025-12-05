@@ -1,15 +1,21 @@
 name: Deploy to EC2
 
-on: [push, pull_request]
+on:
+  push:
+    branches:
+      - main
+  pull_request:
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
 
     steps:
+      # Step 1: Checkout repo
       - name: Checkout repository
         uses: actions/checkout@v3
 
+      # Step 2: Prepare EC2 directory
       - name: Prepare EC2 directory
         uses: appleboy/ssh-action@v0.1.7
         with:
@@ -25,6 +31,7 @@ jobs:
                 echo "/home/ec2-user/app already exists, skipping creation."
             fi
 
+      # Step 3: Clone or update repo
       - name: Deploy repo on EC2
         uses: appleboy/ssh-action@v0.1.7
         with:
@@ -32,7 +39,9 @@ jobs:
           username: ec2-user
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
+            # Install git if missing
             sudo yum install -y git || sudo apt-get install -y git
+
             cd /home/ec2-user/app
 
             if [ -d ".git" ]; then
@@ -45,28 +54,36 @@ jobs:
               git clone https://github.com/duke-de-fall2025/notify-recommender-sys.git .
             fi
 
-      - name: Install Docker and Docker Compose
+            echo "Repo contents:"
+            ls -la
+
+      # Step 4: Ensure Docker & Docker Compose installed
+      - name: Install Docker & Docker Compose if missing
         uses: appleboy/ssh-action@v0.1.7
         with:
           host: ${{ secrets.EC2_IP }}
           username: ec2-user
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
-            # Install Docker if not installed
+            # Install Docker if missing
             if ! command -v docker &> /dev/null; then
-              echo "Installing Docker..."
-              sudo yum install -y docker || sudo apt-get install -y docker.io
-              sudo service docker start
-              sudo usermod -aG docker ec2-user
+                echo "Installing Docker..."
+                sudo yum install -y docker || sudo apt-get install -y docker.io
+                sudo systemctl enable docker
+                sudo systemctl start docker
             fi
 
-            # Install Docker Compose if not installed
+            # Install Docker Compose if missing
             if ! command -v docker-compose &> /dev/null; then
-              echo "Installing Docker Compose..."
-              sudo curl -SL https://github.com/docker/compose/releases/download/v2.23.1/docker-compose-linux-x86_64 -o /usr/local/bin/docker-compose
-              sudo chmod +x /usr/local/bin/docker-compose
+                echo "Installing Docker Compose..."
+                sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+                sudo chmod +x /usr/local/bin/docker-compose
             fi
 
+            docker --version
+            docker-compose --version
+
+      # Step 5: Build and start containers using docker-compose
       - name: Build and start containers on EC2
         uses: appleboy/ssh-action@v0.1.7
         with:
@@ -74,27 +91,27 @@ jobs:
           username: ec2-user
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
-            cd /home/ec2-user/app
+            cd /home/ec2-user/app  # adjust if docker-compose.yml is in a subfolder
             docker-compose down
             docker-compose build
             docker-compose up -d
 
-      - name: Run startup scripts and show logs
+      # Step 6: Run startup scripts and stream logs
+      - name: Run startup scripts and stream logs
         uses: appleboy/ssh-action@v0.1.7
         with:
           host: ${{ secrets.EC2_IP }}
           username: ec2-user
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
-            # Make startup scripts executable
+            # Make startup scripts executable inside containers
             docker exec -i app bash -c "chmod +x /app/startup/startup.sh"
             docker exec -i consumer_app bash -c "chmod +x /app/startup/startup.sh"
 
-            # Run startup scripts
+            # Run startup scripts in background and log output
             docker exec -i app bash -c "nohup /app/startup/startup.sh > /app/startup/app.log 2>&1 &"
             docker exec -i consumer_app bash -c "nohup /app/startup/startup.sh > /app/startup/consumer.log 2>&1 &"
 
-            # Stream logs
             echo "Streaming logs from app container:"
             docker exec -i app bash -c "tail -f /app/startup/app.log" &
             echo "Streaming logs from consumer_app container:"
