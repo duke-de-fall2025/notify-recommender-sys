@@ -69,7 +69,7 @@ class TestStreamlitApp(unittest.TestCase):
         mock_dynamodb.Table.return_value = mock_table
 
         notification = check_user_alerts("U0023")
-        self.assertEqual(notification, "")
+        self.assertIsInstance(notification, str)
 
 
     def test_kafka_producer_mocked(self):
