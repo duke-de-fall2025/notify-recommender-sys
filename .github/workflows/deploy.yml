@@ -49,7 +49,7 @@ jobs:
             cd /home/ec2-user
             
             echo "Cloning repo..."
-            git clone https://github.com/duke-de-fall2025/notify-recommender-sys.git app
+            git clone -b Kafka-and-UI $ https://github.com/duke-de-fall2025/notify-recommender-sys.git app
             
             cd app
             echo "Repo contents:"
