@@ -92,7 +92,28 @@ jobs:
             docker --version
             docker-compose --version
 
-      # Step 5: Build and start containers using docker-compose
+
+       # Step 5: Create .env file with AWS credentials
+      - name: Create .env file with AWS credentials
+        uses: appleboy/ssh-action@v0.1.7
+        with:
+          host: ${{ secrets.EC2_IP }}
+          username: ec2-user
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            cd /home/ec2-user/app
+            
+            # Create .env file with AWS credentials
+            cat > .env << EOF
+            AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
+            AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
+            AWS_DEFAULT_REGION=${{ secrets.AWS_REGION }}
+            EOF
+            
+            chmod 600 .env
+            echo ".env file created successfully"
+
+      # Step 6: Build and start containers using docker-compose
       - name: Build and start containers on EC2
         uses: appleboy/ssh-action@v0.1.7
         with:
@@ -118,7 +139,7 @@ jobs:
             echo "Containers running:"
             sudo docker ps
 
-      # Step 6: Run startup scripts and stream logs
+      # Step 7: Run startup scripts and stream logs
       - name: Run startup scripts and stream logs
         uses: appleboy/ssh-action@v0.1.7
         with:
