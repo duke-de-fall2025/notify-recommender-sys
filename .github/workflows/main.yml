@@ -1,4 +1,4 @@
-name: Python Template for IDS706
+name: Notify_Recommender_System
 
 on: [push, pull_request]
 
