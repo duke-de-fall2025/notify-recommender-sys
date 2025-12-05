@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 
 s3_client = boto3.client(
     's3',
-    region_name='us-east-1',  # your bucket region
+    region_name='us-east-1',  
     aws_access_key_id= os.getenv('AWS_ACCESS_KEY_ID'),
     aws_secret_access_key= os.getenv('AWS_SECRET_ACCESS_KEY')
 )
@@ -47,14 +47,15 @@ def get_s3_image(s3_uri):
 def check_user_alerts(user_id):
     """Check DynamoDB for user notifications"""
     try:
-        alerts_table = dynamodb.Table('user_notifications')
-        response = alerts_table.get_item(Key={'user_id': user_id})
+        print("Checking alerts for user:", user_id)
+        # alerts_table = dynamodb.Table('user_notifications')
+        # response = alerts_table.get_item(Key={'user_id': user_id})
         
-        # Get the notification string
-        notification = response.get('Item', {}).get('notification', '')
+        # # Get the notification string
+        # notification = response.get('Item', {}).get('notification', '')
         
-        return notification if notification else ''
-        # return "Hey There! New products in your favorite category are now available. Check them out!"
+        # return notification if notification else ''
+        return "Stay warm in style! Explore our latest winter collection with fresh arrivals and use code HURRAY10 to get 10% off" 
     except Exception as e:
         return ''
 
@@ -126,8 +127,8 @@ def check_notifications_background():
     print(f"Time since last alert check: {time_diff} seconds")
 
     # Only show toast if > 40 seconds since last toast
-    if new_notification and new_notification not in st.session_state.seen_notifications and time_diff >= 40:
-        print("sending toast...")
+    if new_notification and time_diff >= 40:
+        print("sending notification...")
         st.session_state.user_notification = new_notification
         st.toast(
                 f"🔔 {new_notification}",
