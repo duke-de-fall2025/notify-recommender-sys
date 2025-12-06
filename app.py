@@ -14,6 +14,11 @@ s3_client = boto3.client(
     aws_access_key_id= os.getenv('AWS_ACCESS_KEY_ID'),
     aws_secret_access_key= os.getenv('AWS_SECRET_ACCESS_KEY')
 )
+lambda_client = boto3.client("lambda", 
+    region_name='us-east-1',  
+    aws_access_key_id= os.getenv('AWS_ACCESS_KEY_ID'),
+    aws_secret_access_key= os.getenv('AWS_SECRET_ACCESS_KEY')
+)
 
 FALLBACK_IMAGE = "s3://notify-products/images/na_image/image_not_available.jpg"
 
@@ -45,19 +50,35 @@ def get_s3_image(s3_uri):
     return load_image_from_s3(s3_uri)
 
 def check_user_alerts(user_id):
-    """Check DynamoDB for user notifications"""
+    """Check API for user notifications"""
     try:
-        print("Checking alerts for user:", user_id)
-        # alerts_table = dynamodb.Table('user_notifications')
-        # response = alerts_table.get_item(Key={'user_id': user_id})
-        
-        # # Get the notification string
-        # notification = response.get('Item', {}).get('notification', '')
-        
-        # return notification if notification else ''
-        return "Stay warm in style! Explore our latest winter collection with fresh arrivals and use code HURRAY10 to get 10% off" 
+        print(f"Checking alerts for user: {user_id}")
+
+        # Prepare payload
+        payload = {"user_id": user_id}
+
+        # Invoke Lambda synchronously
+        response = lambda_client.invoke(
+            FunctionName="sagemaker-inference-test",
+            InvocationType="RequestResponse",
+            Payload=json.dumps(payload)
+        )
+
+        # Parse the response
+        result = json.loads(response["Payload"].read())
+        body = json.loads(result.get("body", "{}"))
+
+        # Extract notification text
+        notification = (
+            body.get("top_recommendation", {})
+                .get("campaign_data", {})
+                .get("template_long", "")
+        )
+        return notification
+
     except Exception as e:
-        return ''
+        print("Error fetching user alert:", e)
+        return ""
 
 
 def create_view_dialog(row, img):
@@ -84,12 +105,8 @@ producer = KafkaProducer(
 
 dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
 table = dynamodb.Table('notify_products')
-
-# Scan table (for small datasets)
 response = table.scan()
 items = response['Items']
-
-# Convert to DataFrame
 df = pd.DataFrame(items)
 
 # -----------------------------
@@ -117,8 +134,7 @@ if "initial_load" not in st.session_state:
 if "seen_notifications" not in st.session_state:
     st.session_state.seen_notifications = set()
 
-# Use fragment with auto-refresh to check notifications without losing session
-@st.fragment(run_every=30)  # Run every 300 seconds (5 minutes)
+@st.fragment(run_every=10)  # Run every 10 seconds
 def check_notifications_background():
     """Background task to check for new notifications"""
     new_notification = check_user_alerts(current_user["user_id"])
@@ -126,14 +142,14 @@ def check_notifications_background():
     time_diff = (now - st.session_state.last_alert_check).total_seconds()
     print(f"Time since last alert check: {time_diff} seconds")
 
-    # Only show toast if > 30 seconds since last toast
-    if new_notification and time_diff >= 30:
+    # Only show toast if > 10 seconds since last toast
+    if new_notification and new_notification not in st.session_state.seen_notifications and time_diff >= 40:
         print("sending notification...")
         st.session_state.user_notification = new_notification
         st.toast(
                 f"🔔 {new_notification}",
                 icon="📬",
-                duration=10000)
+                duration=7000)
         st.session_state.seen_notifications.add(new_notification)
         st.session_state.last_alert_check = now
 
