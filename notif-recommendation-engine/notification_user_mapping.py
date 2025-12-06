@@ -6,8 +6,8 @@ from decimal import Decimal
 
 dynamodb = boto3.resource("dynamodb", region_name="us-east-1")
 
-USERS_TABLE = "notify_users_test"
-CAMPAIGNS_TABLE = "notify_campaigns_test"
+USERS_TABLE = "notify_users_embeddings_v2"
+CAMPAIGNS_TABLE = "notify_campaign_embeddings_v2"
 
 users_table = dynamodb.Table(USERS_TABLE)
 campaigns_table = dynamodb.Table(CAMPAIGNS_TABLE)
