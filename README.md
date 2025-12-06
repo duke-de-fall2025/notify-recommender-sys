@@ -6,6 +6,20 @@
 
 **Team:** Pranshul, Sejal, Kedar, Shambhavi, Supriya
 
+---
+
+## 🎥 Demo Video
+
+**📹 Watch the System in Action:**
+
+👉 **[View Demo on Google Drive](https://drive.google.com/file/d/1UuUn7b9tgiD0I8TgcvihzxDXPbwOCWvR/view?usp=sharing)**
+
+**📊 Presentation Slides:**
+
+👉 **[View Slides (Demo Slides PDF)](./DemoSlides.pdf)**
+
+---
+
 ### Problem & Solution
 
 | Challenge | Solution |
