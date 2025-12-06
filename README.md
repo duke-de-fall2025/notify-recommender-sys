@@ -181,7 +181,7 @@ This document includes:
 
 For detailed API specifications, request/response schemas, error handling, and integration examples, see:
 
-👉 **[API Contracts Documentation](./notif-recommendation-engine/API_CONTRACTS.md)**
+👉 **[API Contracts Documentation](./API_CONTRACTS.md)**
 
 This document provides:
 - **Recommendation Engine APIs:** Get top-10 personalised campaigns, user embedding lookup
