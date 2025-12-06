@@ -2,9 +2,22 @@
 
 [![Python Template for IDS706](https://github.com/duke-de-fall2025/notify-recommender-sys/actions/workflows/main.yml/badge.svg)](https://github.com/duke-de-fall2025/notify-recommender-sys/actions/workflows/main.yml)
 
-**Notify** is a production-grade, ML-powered real-time notification platform delivering hyper-personalised campaigns at scale.
+## Overview
 
-**Team:** Pranshul, Sejal, Kedar, Shambhavi, Supriya
+Many online platforms struggle to keep users engaged because notifications are generic, poorly timed, or disconnected from what the user actually wants. This leads to ignored messages, poor engagement, and lost revenue.
+
+*Notify* solves this by providing an *intelligent, plug-and-play notification engine* that any business can integrate.  
+Using machine learning, large language models, and real-time streaming, Notify:
+
+•⁠  ⁠Generates personalised notification text  
+•⁠  ⁠Predicts engagement & advertisement value  
+•⁠  ⁠Schedules notifications optimally for each user  
+•⁠  ⁠Tracks performance & user interactions in real time 
+
+
+*Notify* is a production-grade, ML-powered real-time notification platform delivering hyper-personalised campaigns at scale.
+
+*Team:* Pranshul Bhatnagar, Sejal Jagtap, Kedar Vaidya, Shambhavi Khanna, Supriya Nannapaneni
 
 ---
 
@@ -44,7 +57,7 @@ Frontend (Web/App) → Kafka Streaming → DynamoDB
                   User Interactions (Feedback Loop)
 ```
 
----
+Project Visual Architecture- https://drive.google.com/file/d/1Dd9SwFVRfX6F4o3Op9vbZzILXpl1d2dk/view
 
 ## 📊 System Components
 
@@ -232,3 +245,13 @@ All APIs are implemented as **AWS Lambda functions** and are fully serverless, e
 ## 📞 Contact & Support
 
 For questions or contributions, reach out to the team or open an issue.
+
+## Conclusion
+
+Notify provides a complete, intelligent, and highly extensible platform for generating, scoring, and delivering personalised notifications in real time. By combining machine learning, large language models, event streaming, and optimisation-driven scheduling, the system ensures that every message sent to a user is meaningful, timely, and aligned with business value.
+
+The architecture is modular, cloud-ready, and designed to integrate seamlessly with existing products—whether you want to enrich user engagement, boost conversions, or optimise ad-driven revenue. With clear APIs, an event-driven pipeline, a lightweight frontend widget, and powerful observability tooling, Notify serves as a strong foundation for experimentation, scaling, and future enhancements.
+
+This project can be extended into production environments with more advanced ranking systems, reinforcement learning, cross-channel notifications, and continual model feedback loops. As a whole, Notify demonstrates how intelligent personalisation can transform user engagement into measurable business impact.
+
+---
