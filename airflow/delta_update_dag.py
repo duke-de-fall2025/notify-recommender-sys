@@ -27,9 +27,9 @@ PURCHASE_TABLE = "notify_purchase_history"
 USER_SOURCE_TABLE = "notify_users"
 CAMPAIGN_SOURCE_TABLE = "notify_campaigns"
 
-USER_EMBED_TABLE = "notify_user_embeddings_v1"
-PURCHASE_EMBED_TABLE = "notify_purchase_embeddings_v1"
-CAMPAIGN_EMBED_TABLE = "notify_campaign_embeddings_v1"
+USER_EMBED_TABLE = "notify_user_embeddings_v2"
+PURCHASE_EMBED_TABLE = "notify_purchase_embeddings_v2"
+CAMPAIGN_EMBED_TABLE = "notify_campaign_embeddings_v2"
 
 EMBED_DIM = 384
 LAST_K = 5
@@ -65,35 +65,20 @@ def convert_decimals(item):
 # SCANS
 # ==========================================================
 
-def scan_table(table_name):
+def scan_table(table_name, limit=100):
     dynamodb = aws_resource("dynamodb")
     table = dynamodb.Table(table_name)
 
-    items, resp = [], table.scan()
+    items, resp = [], table.scan(Limit=limit)
     items.extend(resp.get("Items", []))
 
     while "LastEvaluatedKey" in resp:
         resp = table.scan(ExclusiveStartKey=resp["LastEvaluatedKey"])
         items.extend(resp.get("Items", []))
 
-    return [convert_decimals(i) for i in items]
-
-def delta_scan(table_name, ts_field="updated_at", hours=24):
-    dynamodb = aws_resource("dynamodb")
-    table = dynamodb.Table(table_name)
-
-    cutoff = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
-    items = []
-
-    resp = table.scan(FilterExpression=Attr(ts_field).gte(cutoff))
-    items.extend(resp.get("Items", []))
-
-    while "LastEvaluatedKey" in resp:
-        resp = table.scan(
-            ExclusiveStartKey=resp["LastEvaluatedKey"],
-            FilterExpression=Attr(ts_field).gte(cutoff)
-        )
-        items.extend(resp.get("Items", []))
+    log.info(f"[DEBUG] scan_table({table_name}) → {len(items)} rows")
+    if items:
+        log.info(f"[DEBUG] scan_table sample → {items[0]}")
 
     return [convert_decimals(i) for i in items]
 
@@ -101,7 +86,7 @@ def fake_embed(dim=EMBED_DIM):
     return [random.random() for _ in range(dim)]
 
 # ==========================================================
-# AUTO-CREATE EMBEDDING TABLE
+# TABLE CREATION
 # ==========================================================
 
 def ensure_embedding_table_exists(table_name, pk):
@@ -109,7 +94,7 @@ def ensure_embedding_table_exists(table_name, pk):
 
     try:
         client.describe_table(TableName=table_name)
-        log.info(f"[DEBUG] Table already exists → {table_name}")
+        log.info(f"[DEBUG] Table exists → {table_name}")
         return
     except client.exceptions.ResourceNotFoundException:
         log.warning(f"[DEBUG] Creating table → {table_name}")
@@ -121,8 +106,7 @@ def ensure_embedding_table_exists(table_name, pk):
         BillingMode="PAY_PER_REQUEST"
     )
 
-    waiter = client.get_waiter("table_exists")
-    waiter.wait(TableName=table_name)
+    client.get_waiter("table_exists").wait(TableName=table_name)
     log.info(f"[DEBUG] Table created → {table_name}")
 
 # ==========================================================
@@ -132,35 +116,29 @@ def ensure_embedding_table_exists(table_name, pk):
 def load_products(**context):
     products = scan_table(PRODUCT_TABLE)
     log.info(f"[DEBUG] load_products → count={len(products)}")
-    if products:
-        log.info(f"[DEBUG] load_products sample={products[0]}")
-    context["ti"].xcom_push("delta_products", products)
+    context["ti"].xcom_push(key="delta_products", value=products)
 
 def load_orders(**context):
     orders = scan_table(PURCHASE_TABLE)
     log.info(f"[DEBUG] load_orders → count={len(orders)}")
-    if orders:
-        log.info(f"[DEBUG] load_orders sample={orders[0]}")
-    context["ti"].xcom_push("all_orders", orders)
+    context["ti"].xcom_push(key="all_orders", value=orders)
 
 def load_users(**context):
-    users = delta_scan(USER_SOURCE_TABLE, ts_field="created_at", hours=24)
+    users = scan_table(USER_SOURCE_TABLE)
     log.info(f"[DEBUG] load_users → count={len(users)}")
-    context["ti"].xcom_push("delta_users", users)
+    context["ti"].xcom_push(key="delta_users", value=users)
 
 def load_campaigns(**context):
     campaigns = scan_table(CAMPAIGN_SOURCE_TABLE)
     log.info(f"[DEBUG] load_campaigns → count={len(campaigns)}")
-    if campaigns:
-        log.info(f"[DEBUG] load_campaigns sample={campaigns[0]}")
-    context["ti"].xcom_push("delta_campaigns", campaigns)
+    context["ti"].xcom_push(key="delta_campaigns", value=campaigns)
 
 # ==========================================================
 # PRODUCT EMBEDDINGS
 # ==========================================================
 
 def embed_products(**context):
-    products = context["ti"].xcom_pull("load_products", "delta_products") or []
+    products = context["ti"].xcom_pull(task_ids="load_products", key="delta_products") or []
     log.info(f"[DEBUG] embed_products → received={len(products)}")
 
     dynamodb = aws_resource("dynamodb")
@@ -170,11 +148,12 @@ def embed_products(**context):
         log.info(f"[DEBUG] embedding product_id={p.get('product_id')}")
 
     for p in products:
-        pid = int(p["product_id"])
         table.update_item(
-            Key={"product_id": pid},
+            Key={"product_id": int(p["product_id"])},
             UpdateExpression="SET embedding = :e",
-            ExpressionAttributeValues={":e": to_decimal_vector(fake_embed())}
+            ExpressionAttributeValues={
+                ":e": to_decimal_vector(fake_embed())
+            }
         )
 
     log.info("[DEBUG] embed_products → completed")
@@ -184,12 +163,11 @@ def embed_products(**context):
 # ==========================================================
 
 def build_purchase_embeddings(**context):
-    orders = context["ti"].xcom_pull("load_orders", "all_orders") or []
+    orders = context["ti"].xcom_pull(task_ids="load_orders", key="all_orders") or []
     log.info(f"[DEBUG] build_purchase_embeddings → orders={len(orders)}")
 
     dynamodb = aws_resource("dynamodb")
     product_table = dynamodb.Table(PRODUCT_TABLE)
-
     purchase_vectors = {}
 
     for o in orders[:3]:
@@ -200,8 +178,9 @@ def build_purchase_embeddings(**context):
         product_id = int(o["product_id"])
         user_id = str(o["user_id"])
 
-        resp = product_table.get_item(Key={"product_id": product_id})
-        product = resp.get("Item")
+        product = product_table.get_item(
+            Key={"product_id": product_id}
+        ).get("Item", {})
 
         if not product:
             log.error(f"[ERROR] No product found for product_id={product_id}")
@@ -213,10 +192,7 @@ def build_purchase_embeddings(**context):
             "embedding": emb,
             "user_id": user_id,
             "product_id": str(product_id),
-            "price": o.get("price"),
-            "quantity": o.get("quantity"),
-            "total_amount": o.get("total_amount"),
-            "purchase_date": o.get("purchase_date")
+            "total_amount": o.get("total_amount")
         }
 
     log.info(f"[DEBUG] build_purchase_embeddings → built={len(purchase_vectors)}")
@@ -224,12 +200,9 @@ def build_purchase_embeddings(**context):
 
 def persist_purchase_embeddings(**context):
     ensure_embedding_table_exists(PURCHASE_EMBED_TABLE, "purchase_id")
-    vectors = context["ti"].xcom_pull("build_purchase_embeddings") or {}
-    log.info(f"[DEBUG] persist_purchase_embeddings → vectors={len(vectors)}")
+    vectors = context["ti"].xcom_pull(task_ids="build_purchase_embeddings") or {}
 
-    if not vectors:
-        log.error("[CRITICAL] No purchase vectors to persist")
-        return
+    log.info(f"[DEBUG] persist_purchase_embeddings → vectors={len(vectors)}")
 
     dynamodb = aws_resource("dynamodb")
     table = dynamodb.Table(PURCHASE_EMBED_TABLE)
@@ -255,17 +228,23 @@ def persist_purchase_embeddings(**context):
 # ==========================================================
 
 def build_user_embeddings(**context):
-    users = context["ti"].xcom_pull("load_users", "delta_users") or []
-    orders = context["ti"].xcom_pull("load_orders", "all_orders") or []
+    users = context["ti"].xcom_pull(task_ids="load_users", key="delta_users") or []
+    orders = context["ti"].xcom_pull(task_ids="load_orders", key="all_orders") or []
 
     log.info(f"[DEBUG] build_user_embeddings → users={len(users)}, orders={len(orders)}")
 
-    if not users:
-        log.error("[CRITICAL] No users found in delta window")
+    debug_user = "U0023"
+    user_ids = [str(u["user_id"]) for u in users]
+    log.info(f"[DEBUG] First 10 users: {user_ids[:10]}")
+
+    if debug_user not in user_ids:
+        log.error(f"[CRITICAL] {debug_user} not found in users")
 
     order_map = {}
     for o in orders:
-        order_map.setdefault(o["user_id"], []).append(int(o["product_id"]))
+        order_map.setdefault(str(o["user_id"]), []).append(int(o["product_id"]))
+
+    log.info(f"[DEBUG] Orders for {debug_user}: {order_map.get(debug_user)}")
 
     dynamodb = aws_resource("dynamodb")
     product_table = dynamodb.Table(PRODUCT_TABLE)
@@ -273,16 +252,23 @@ def build_user_embeddings(**context):
     user_vectors = {}
 
     for u in users:
-        uid = u["user_id"]
+        uid = str(u["user_id"])
         vec = []
 
         pids = order_map.get(uid, [])[:LAST_K]
-        log.info(f"[DEBUG] user={uid} recent_products={pids}")
+
+        if uid == debug_user:
+            log.info(f"[DEBUG] U0023 recent_products={pids}")
 
         for pid in pids:
-            resp = product_table.get_item(Key={"product_id": pid})
-            item = resp.get("Item", {})
-            vec.extend(item.get("embedding", [0.0] * EMBED_DIM))
+            emb = product_table.get_item(
+                Key={"product_id": pid}
+            ).get("Item", {}).get("embedding")
+
+            if uid == debug_user:
+                log.info(f"[DEBUG] product_id={pid} embedding_exists={emb is not None}")
+
+            vec.extend(emb or [0.0] * EMBED_DIM)
 
         while len(vec) < USER_EMBED_DIM:
             vec.extend([0.0] * EMBED_DIM)
@@ -290,16 +276,17 @@ def build_user_embeddings(**context):
         user_vectors[uid] = vec
 
     log.info(f"[DEBUG] build_user_embeddings → built={len(user_vectors)}")
+
+    if debug_user in user_vectors:
+        log.info(f"[DEBUG] Final vector length for U0023={len(user_vectors[debug_user])}")
+
     return user_vectors
 
 def persist_user_embeddings(**context):
     ensure_embedding_table_exists(USER_EMBED_TABLE, "user_id")
-    vectors = context["ti"].xcom_pull("build_user_embeddings") or {}
-    log.info(f"[DEBUG] persist_user_embeddings → vectors={len(vectors)}")
+    vectors = context["ti"].xcom_pull(task_ids="build_user_embeddings") or {}
 
-    if not vectors:
-        log.error("[CRITICAL] No user vectors to persist")
-        return
+    log.info(f"[DEBUG] persist_user_embeddings → vectors={len(vectors)}")
 
     dynamodb = aws_resource("dynamodb")
     table = dynamodb.Table(USER_EMBED_TABLE)
@@ -325,7 +312,7 @@ def persist_user_embeddings(**context):
 # ==========================================================
 
 def embed_campaigns(**context):
-    campaigns = context["ti"].xcom_pull("load_campaigns", "delta_campaigns") or []
+    campaigns = context["ti"].xcom_pull(task_ids="load_campaigns", key="delta_campaigns") or []
     log.info(f"[DEBUG] embed_campaigns → campaigns={len(campaigns)}")
 
     campaign_vectors = {}
@@ -335,10 +322,7 @@ def embed_campaigns(**context):
         campaign_vectors[cid] = {
             "embedding": fake_embed(),
             "status": c.get("status"),
-            "priority": c.get("priority"),
-            "notification_type": c.get("notification_type"),
-            "start_date": c.get("start_date"),
-            "end_date": c.get("end_date")
+            "priority": c.get("priority")
         }
 
     log.info(f"[DEBUG] embed_campaigns → built={len(campaign_vectors)}")
@@ -346,14 +330,15 @@ def embed_campaigns(**context):
 
 def persist_campaigns(**context):
     ensure_embedding_table_exists(CAMPAIGN_EMBED_TABLE, "campaign_id")
-    vectors = context["ti"].xcom_pull("embed_campaigns") or {}
+    vectors = context["ti"].xcom_pull(task_ids="embed_campaigns") or {}
+
     log.info(f"[DEBUG] persist_campaigns → vectors={len(vectors)}")
 
     dynamodb = aws_resource("dynamodb")
     table = dynamodb.Table(CAMPAIGN_EMBED_TABLE)
     now = datetime.utcnow().isoformat()
 
-    for cid, payload in list(vectors.items())[:3]:
+    for cid in list(vectors.keys())[:3]:
         log.info(f"[DEBUG] writing campaign_id={cid}")
 
     for cid, payload in vectors.items():
@@ -408,14 +393,9 @@ with DAG(
     embed_campaigns_task = PythonOperator(task_id="embed_campaigns", python_callable=embed_campaigns)
     persist_campaigns_task = PythonOperator(task_id="persist_campaigns", python_callable=persist_campaigns)
 
-    # ===========================
-    # UPDATED DEPENDENCIES
-    # ===========================
-
     load_products_task >> embed_products_task
-    embed_products_task >> build_purchase_embeddings_task
-
     load_orders_task >> build_purchase_embeddings_task
+    embed_products_task >> build_purchase_embeddings_task
     build_purchase_embeddings_task >> persist_purchase_embeddings_task
 
     load_users_task >> build_user_embeddings_task
