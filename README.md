@@ -177,6 +177,23 @@ This document includes:
 - **Cost & Monitoring:** Budget targets, observability metrics
 - **Design Principles:** Serverless-first, event-driven, cost-optimized
 
+### 🔌 API Contracts & Integration Guide
+
+For detailed API specifications, request/response schemas, error handling, and integration examples, see:
+
+👉 **[API Contracts Documentation](./notif-recommendation-engine/API_CONTRACTS.md)**
+
+This document provides:
+- **Recommendation Engine APIs:** Get top-10 personalised campaigns, user embedding lookup
+- **Scheduling APIs:** Create optimised 24-hour schedules, EventBridge integration
+- **Request/Response Schemas:** Complete JSON specifications with field descriptions
+- **Error Handling:** Standardised error responses with HTTP status codes and retry policies
+- **SLAs & Performance:** ≤200ms P95 latency, 99.95% availability, 99.9% success rate
+- **Integration Examples:** End-to-end workflow examples and error handling patterns
+- **Data Models:** Campaign, user embedding, and notification schedule object schemas
+
+All APIs are implemented as **AWS Lambda functions** and are fully serverless, event-driven, and designed for high-throughput real-time processing.
+
 ---
 
 ## 📈 Business Impact
