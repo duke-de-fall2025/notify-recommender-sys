@@ -1,12 +1,11 @@
 import boto3
-import random
 import logging
 from airflow import DAG
 from decimal import Decimal
 from datetime import datetime, timedelta
-from boto3.dynamodb.conditions import Attr
 from airflow.operators.python import PythonOperator
 from airflow.providers.amazon.aws.hooks.base_aws import AwsBaseHook
+from sentence_transformers import SentenceTransformer
 
 # ==========================================================
 # GLOBAL LOGGING
@@ -35,6 +34,28 @@ EMBED_DIM = 384
 LAST_K = 5
 USER_EMBED_DIM = EMBED_DIM * LAST_K
 
+SCAN_LIMIT = 100 # For Testing
+
+# ==========================================================
+# BERT MODEL (CACHED PER WORKER)
+# ==========================================================
+
+EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+_embedding_model = None
+
+def get_embedding_model():
+    global _embedding_model
+    if _embedding_model is None:
+        log.info("[DEBUG] Loading BERT embedding model...")
+        _embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
+        log.info("[DEBUG] BERT model loaded")
+    return _embedding_model
+
+def bert_embed(text: str):
+    model = get_embedding_model()
+    vec = model.encode(text, normalize_embeddings=True)
+    return vec.tolist()
+
 # ==========================================================
 # AWS HELPERS
 # ==========================================================
@@ -62,28 +83,21 @@ def convert_decimals(item):
     return item
 
 # ==========================================================
-# SCANS
+# SCANS (HARD LIMITED TO 100)
 # ==========================================================
 
-def scan_table(table_name, limit=100):
+def scan_table(table_name):
     dynamodb = aws_resource("dynamodb")
     table = dynamodb.Table(table_name)
 
-    items, resp = [], table.scan(Limit=limit)
-    items.extend(resp.get("Items", []))
+    resp = table.scan(Limit=SCAN_LIMIT)
+    items = resp.get("Items", [])
 
-    while "LastEvaluatedKey" in resp:
-        resp = table.scan(ExclusiveStartKey=resp["LastEvaluatedKey"])
-        items.extend(resp.get("Items", []))
-
-    log.info(f"[DEBUG] scan_table({table_name}) → {len(items)} rows")
+    log.info(f"[DEBUG] scan_table({table_name}) → returned={len(items)} (HARD LIMIT={SCAN_LIMIT})")
     if items:
         log.info(f"[DEBUG] scan_table sample → {items[0]}")
 
     return [convert_decimals(i) for i in items]
-
-def fake_embed(dim=EMBED_DIM):
-    return [random.random() for _ in range(dim)]
 
 # ==========================================================
 # TABLE CREATION
@@ -134,7 +148,7 @@ def load_campaigns(**context):
     context["ti"].xcom_push(key="delta_campaigns", value=campaigns)
 
 # ==========================================================
-# PRODUCT EMBEDDINGS
+# PRODUCT EMBEDDINGS (REAL BERT)
 # ==========================================================
 
 def embed_products(**context):
@@ -148,12 +162,23 @@ def embed_products(**context):
         log.info(f"[DEBUG] embedding product_id={p.get('product_id')}")
 
     for p in products:
+        pid = int(p["product_id"])
+
+        text = " ".join([
+            str(p.get("productDisplayName", "")),
+            str(p.get("masterCategory", "")),
+            str(p.get("subCategory", "")),
+            str(p.get("articleType", "")),
+            str(p.get("baseColour", "")),
+            str(p.get("usage", ""))
+        ])
+
+        embedding = bert_embed(text)
+
         table.update_item(
-            Key={"product_id": int(p["product_id"])},
+            Key={"product_id": pid},
             UpdateExpression="SET embedding = :e",
-            ExpressionAttributeValues={
-                ":e": to_decimal_vector(fake_embed())
-            }
+            ExpressionAttributeValues={":e": to_decimal_vector(embedding)}
         )
 
     log.info("[DEBUG] embed_products → completed")
@@ -170,25 +195,15 @@ def build_purchase_embeddings(**context):
     product_table = dynamodb.Table(PRODUCT_TABLE)
     purchase_vectors = {}
 
-    for o in orders[:3]:
-        log.info(f"[DEBUG] order sample={o}")
-
     for o in orders:
-        purchase_id = str(o["purchase_id"])
+        pid = str(o["purchase_id"])
         product_id = int(o["product_id"])
         user_id = str(o["user_id"])
 
-        product = product_table.get_item(
-            Key={"product_id": product_id}
-        ).get("Item", {})
-
-        if not product:
-            log.error(f"[ERROR] No product found for product_id={product_id}")
-            continue
-
+        product = product_table.get_item(Key={"product_id": product_id}).get("Item", {})
         emb = product.get("embedding", [0.0] * EMBED_DIM)
 
-        purchase_vectors[purchase_id] = {
+        purchase_vectors[pid] = {
             "embedding": emb,
             "user_id": user_id,
             "product_id": str(product_id),
@@ -207,9 +222,6 @@ def persist_purchase_embeddings(**context):
     dynamodb = aws_resource("dynamodb")
     table = dynamodb.Table(PURCHASE_EMBED_TABLE)
     now = datetime.utcnow().isoformat()
-
-    for pid in list(vectors.keys())[:3]:
-        log.info(f"[DEBUG] writing purchase_id={pid}")
 
     for pid, payload in vectors.items():
         table.update_item(
@@ -233,18 +245,9 @@ def build_user_embeddings(**context):
 
     log.info(f"[DEBUG] build_user_embeddings → users={len(users)}, orders={len(orders)}")
 
-    debug_user = "U0023"
-    user_ids = [str(u["user_id"]) for u in users]
-    log.info(f"[DEBUG] First 10 users: {user_ids[:10]}")
-
-    if debug_user not in user_ids:
-        log.error(f"[CRITICAL] {debug_user} not found in users")
-
     order_map = {}
     for o in orders:
         order_map.setdefault(str(o["user_id"]), []).append(int(o["product_id"]))
-
-    log.info(f"[DEBUG] Orders for {debug_user}: {order_map.get(debug_user)}")
 
     dynamodb = aws_resource("dynamodb")
     product_table = dynamodb.Table(PRODUCT_TABLE)
@@ -255,20 +258,12 @@ def build_user_embeddings(**context):
         uid = str(u["user_id"])
         vec = []
 
-        pids = order_map.get(uid, [])[:LAST_K]
+        for pid in order_map.get(uid, [])[:LAST_K]:
+            emb = product_table.get_item(Key={"product_id": pid}).get(
+                "Item", {}
+            ).get("embedding", [0.0] * EMBED_DIM)
 
-        if uid == debug_user:
-            log.info(f"[DEBUG] U0023 recent_products={pids}")
-
-        for pid in pids:
-            emb = product_table.get_item(
-                Key={"product_id": pid}
-            ).get("Item", {}).get("embedding")
-
-            if uid == debug_user:
-                log.info(f"[DEBUG] product_id={pid} embedding_exists={emb is not None}")
-
-            vec.extend(emb or [0.0] * EMBED_DIM)
+            vec.extend(emb)
 
         while len(vec) < USER_EMBED_DIM:
             vec.extend([0.0] * EMBED_DIM)
@@ -276,10 +271,6 @@ def build_user_embeddings(**context):
         user_vectors[uid] = vec
 
     log.info(f"[DEBUG] build_user_embeddings → built={len(user_vectors)}")
-
-    if debug_user in user_vectors:
-        log.info(f"[DEBUG] Final vector length for U0023={len(user_vectors[debug_user])}")
-
     return user_vectors
 
 def persist_user_embeddings(**context):
@@ -291,9 +282,6 @@ def persist_user_embeddings(**context):
     dynamodb = aws_resource("dynamodb")
     table = dynamodb.Table(USER_EMBED_TABLE)
     now = datetime.utcnow().isoformat()
-
-    for uid in list(vectors.keys())[:3]:
-        log.info(f"[DEBUG] writing user_id={uid}")
 
     for uid, v in vectors.items():
         table.update_item(
@@ -308,7 +296,7 @@ def persist_user_embeddings(**context):
     log.info("[DEBUG] persist_user_embeddings → completed")
 
 # ==========================================================
-# CAMPAIGN EMBEDDINGS
+# CAMPAIGN EMBEDDINGS (REAL BERT)
 # ==========================================================
 
 def embed_campaigns(**context):
@@ -319,8 +307,17 @@ def embed_campaigns(**context):
 
     for c in campaigns:
         cid = c["campaign_id"]
+
+        text = " ".join([
+            str(c.get("name", "")),
+            str(c.get("description", "")),
+            str(c.get("status", "")),
+            str(c.get("priority", "")),
+            str(c.get("notification_type", ""))
+        ])
+
         campaign_vectors[cid] = {
-            "embedding": fake_embed(),
+            "embedding": bert_embed(text),
             "status": c.get("status"),
             "priority": c.get("priority")
         }
@@ -337,9 +334,6 @@ def persist_campaigns(**context):
     dynamodb = aws_resource("dynamodb")
     table = dynamodb.Table(CAMPAIGN_EMBED_TABLE)
     now = datetime.utcnow().isoformat()
-
-    for cid in list(vectors.keys())[:3]:
-        log.info(f"[DEBUG] writing campaign_id={cid}")
 
     for cid, payload in vectors.items():
         table.update_item(
@@ -362,6 +356,7 @@ with DAG(
     start_date=datetime(2025, 1, 1),
     schedule="@daily",
     catchup=False,
+    dagrun_timeout=timedelta(hours=2),
     tags=["ads", "dynamodb", "mwaa"]
 ):
 
