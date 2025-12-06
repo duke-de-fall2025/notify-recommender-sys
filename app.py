@@ -118,7 +118,7 @@ if "seen_notifications" not in st.session_state:
     st.session_state.seen_notifications = set()
 
 # Use fragment with auto-refresh to check notifications without losing session
-@st.fragment(run_every=30)  # Run every 300 seconds (5 minutes)
+@st.fragment(run_every=40)  # Run every 300 seconds (5 minutes)
 def check_notifications_background():
     """Background task to check for new notifications"""
     new_notification = check_user_alerts(current_user["user_id"])
@@ -127,7 +127,7 @@ def check_notifications_background():
     print(f"Time since last alert check: {time_diff} seconds")
 
     # Only show toast if > 30 seconds since last toast
-    if new_notification and time_diff >= 30:
+    if new_notification and time_diff >= 40:
         print("sending notification...")
         st.session_state.user_notification = new_notification
         st.toast(
